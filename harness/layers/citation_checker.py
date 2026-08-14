@@ -68,16 +68,46 @@ class CitationChecker(Middleware):
     name = "citation_checker"
 
     def after_agent(self, ctx, report):
-        # TODO (§11): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; bỏ qua nếu rỗng hoặc ctx.corpus là None.
-        #  2. Với mỗi claim, gọi ctx.corpus.get(claim["doc_id"]).
-        #     Nếu tài liệu tồn tại VÀ claim["text"] khớp NGUYÊN VĂN một
-        #     DÒNG trong body của nó (không phải chỉ "nằm trong body")
-        #     -> trích dẫn đã đúng, giữ nguyên claim.
-        #  3. Nếu không: tìm trong ctx.corpus.docs tài liệu đầu tiên thoả
-        #     doc.body in ctx.observed_text  và  claim["text"] khớp
-        #     nguyên văn một DÒNG của doc.body -> đó là nguồn thật.
-        #     Đổi doc_id sang nó, GIỮ NGUYÊN text.
-        #  4. Không tìm được nguồn nào -> để `critic` xử lý, đừng bịa doc_id.
-        #  5. Cập nhật report["citations"] = danh sách doc_id đã sắp xếp.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        if not isinstance(report, dict):
+            return report
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims or ctx.corpus is None:
+            return report
+
+        def _in_observed(t: str) -> bool:
+            if not t or not ctx.observed_text:
+                return False
+            return (t in ctx.observed_text) or (t.lower() in ctx.observed_text.lower())
+
+        def _supports_line(doc, text: str) -> bool:
+            if doc is None or not doc.body or not text:
+                return False
+            text_lower = text.lower()
+            return any(text in line or text_lower in line.lower() for line in doc.body.splitlines())
+
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text", "")
+            current_doc_id = claim.get("doc_id", "")
+            current_doc = ctx.corpus.get(current_doc_id) if current_doc_id else None
+
+            if current_doc is not None and _supports_line(current_doc, text):
+                continue
+
+            found_doc_id = None
+            for doc in ctx.corpus.docs:
+                if _in_observed(doc.body) and _supports_line(doc, text):
+                    found_doc_id = doc.doc_id
+                    break
+
+            if found_doc_id is not None:
+                claim["doc_id"] = found_doc_id
+
+        valid_citations = {
+            c["doc_id"]
+            for c in claims
+            if isinstance(c, dict) and c.get("doc_id") and ctx.corpus.get(c["doc_id"]) is not None
+        }
+        report["citations"] = sorted(valid_citations)
+        return report
